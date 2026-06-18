@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -33,5 +34,31 @@ func TestJSONResponseAllowsTextRawBody(t *testing.T) {
 	}
 	if decoded.Accounts[0].Raw != "<html>forbidden</html>" {
 		t.Fatalf("Raw = %#v, want text body", decoded.Accounts[0].Raw)
+	}
+}
+
+func TestQuotaHTTPErrorSummarizesCloudflareChallenge(t *testing.T) {
+	body := []byte(`<html><span id="challenge-error-text">Enable JavaScript and cookies to continue</span><script>window._cf_chl_opt={}</script></html>`)
+	resp := hostHTTPResponse{StatusCode: http.StatusForbidden, Body: body}
+
+	if !shouldTryNextEndpoint(resp) {
+		t.Fatal("shouldTryNextEndpoint = false, want true for Cloudflare challenge")
+	}
+	errText := quotaHTTPError(resp)
+	if !strings.Contains(errText, "Cloudflare challenge") {
+		t.Fatalf("quotaHTTPError = %q, want Cloudflare challenge summary", errText)
+	}
+	if strings.Contains(errText, "_cf_chl_opt") {
+		t.Fatalf("quotaHTTPError leaked challenge HTML: %q", errText)
+	}
+}
+
+func TestTrimmedResponseTextCapsLargeHTML(t *testing.T) {
+	text := trimmedResponseText([]byte(strings.Repeat("x", maxRawTextLength+100)))
+	if len(text) > maxRawTextLength+len("...(truncated)") {
+		t.Fatalf("trimmed text length = %d, want capped", len(text))
+	}
+	if !strings.HasSuffix(text, "...(truncated)") {
+		t.Fatalf("trimmed text suffix = %q, want truncation marker", text[len(text)-20:])
 	}
 }

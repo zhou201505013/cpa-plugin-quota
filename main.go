@@ -71,8 +71,11 @@ import (
 )
 
 const (
-	pluginName           = "codex-quota"
-	defaultQuotaEndpoint = "https://chatgpt.com/backend-api/codex/quota"
+	pluginName             = "codex-quota"
+	defaultQuotaEndpoint   = "https://chatgpt.com/backend-api/codex/quota"
+	defaultCodexUserAgent  = "codex_cli_rs/0.133.0"
+	defaultCodexOriginator = "codex_cli_rs"
+	maxRawTextLength       = 4096
 )
 
 var pluginVersion = "0.1.0"
@@ -407,12 +410,12 @@ func queryOneCodexQuota(auth pluginapi.HostAuthFileEntry, endpoints []string, ho
 	var errHTTP error
 	for i, endpoint := range endpoints {
 		result.Endpoint = endpoint
-		httpResp, errHTTP = doQuotaHTTPRequest(endpoint, authPayload.AccessToken, hostCallbackID)
+		httpResp, errHTTP = doQuotaHTTPRequest(endpoint, authPayload.AccessToken, authPayload.AccountID, hostCallbackID)
 		if errHTTP != nil {
 			result.Error = errHTTP.Error()
 			return result
 		}
-		if httpResp.StatusCode != http.StatusNotFound && httpResp.StatusCode != http.StatusMethodNotAllowed {
+		if !shouldTryNextEndpoint(httpResp) {
 			break
 		}
 		if i == len(endpoints)-1 {
@@ -426,10 +429,10 @@ func queryOneCodexQuota(auth pluginapi.HostAuthFileEntry, endpoints []string, ho
 		result.Quota = raw
 		result.Fields = extractQuotaFields(httpResp.Body)
 	} else if len(httpResp.Body) > 0 {
-		result.Raw = string(httpResp.Body)
+		result.Raw = trimmedResponseText(httpResp.Body)
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		result.Error = strings.TrimSpace(string(httpResp.Body))
+		result.Error = quotaHTTPError(httpResp)
 		if result.Error == "" {
 			result.Error = "quota endpoint returned status " + strconv.Itoa(httpResp.StatusCode)
 		}
@@ -482,7 +485,43 @@ func parseCodexAuthJSON(raw json.RawMessage) (codexAuthPayload, error) {
 	return payload, nil
 }
 
-func doQuotaHTTPRequest(endpoint, accessToken, hostCallbackID string) (hostHTTPResponse, error) {
+func shouldTryNextEndpoint(resp hostHTTPResponse) bool {
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		return true
+	}
+	return resp.StatusCode == http.StatusForbidden && looksLikeCloudflareChallenge(resp.Body)
+}
+
+func quotaHTTPError(resp hostHTTPResponse) string {
+	body := strings.TrimSpace(string(resp.Body))
+	if looksLikeCloudflareChallenge(resp.Body) {
+		return "quota endpoint returned Cloudflare challenge (status " + strconv.Itoa(resp.StatusCode) + ")"
+	}
+	if body == "" {
+		return ""
+	}
+	if json.Valid(resp.Body) {
+		return body
+	}
+	return "quota endpoint returned status " + strconv.Itoa(resp.StatusCode) + ": " + trimmedResponseText(resp.Body)
+}
+
+func looksLikeCloudflareChallenge(body []byte) bool {
+	lower := strings.ToLower(string(body))
+	return strings.Contains(lower, "cf_chl") ||
+		strings.Contains(lower, "challenge-platform") ||
+		strings.Contains(lower, "enable javascript and cookies to continue")
+}
+
+func trimmedResponseText(body []byte) string {
+	text := strings.TrimSpace(string(body))
+	if len(text) <= maxRawTextLength {
+		return text
+	}
+	return text[:maxRawTextLength] + "...(truncated)"
+}
+
+func doQuotaHTTPRequest(endpoint, accessToken, accountID, hostCallbackID string) (hostHTTPResponse, error) {
 	req := hostHTTPRequest{
 		HostCallbackID: strings.TrimSpace(hostCallbackID),
 		Method:         http.MethodGet,
@@ -490,8 +529,13 @@ func doQuotaHTTPRequest(endpoint, accessToken, hostCallbackID string) (hostHTTPR
 		Headers: http.Header{
 			"accept":        []string{"application/json"},
 			"authorization": []string{"Bearer " + accessToken},
-			"user-agent":    []string{"codex-quota-cli-proxy-plugin/" + pluginVersion},
+			"originator":    []string{defaultCodexOriginator},
+			"user-agent":    []string{defaultCodexUserAgent},
+			"openai-beta":   []string{"codex_cli_simplified_flow=true"},
 		},
+	}
+	if strings.TrimSpace(accountID) != "" {
+		req.Headers.Set("chatgpt-account-id", strings.TrimSpace(accountID))
 	}
 	result, errCall := callHost(pluginabi.MethodHostHTTPDo, req)
 	if errCall != nil {
