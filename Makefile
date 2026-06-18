@@ -12,16 +12,27 @@ EXT_windows = dll
 PLUGIN_EXT = $(or $(EXT_$(GOOS)),so)
 PLUGIN_OUTPUT ?= $(BUILD_DIR)/$(PLUGIN_NAME).$(PLUGIN_EXT)
 PLUGIN_HEADER = $(basename $(PLUGIN_OUTPUT)).h
+DIST_DIR ?= dist
 
-.PHONY: build clean
+.PHONY: build package clean
 
 build:
 	mkdir -p $(BUILD_DIR)
 	CGO_ENABLED=1 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -trimpath -buildmode=c-shared -ldflags "$(GO_LDFLAGS)" -o $(PLUGIN_OUTPUT) .
 	rm -f $(PLUGIN_HEADER)
 
+package: build
+	go run .github/scripts/package-release.go \
+		-plugin $(PLUGIN_NAME) \
+		-version $(VERSION) \
+		-goos $(GOOS) \
+		-goarch $(GOARCH) \
+		-binary $(PLUGIN_OUTPUT) \
+		-dist $(DIST_DIR)
+
 clean:
 	rm -f $(BUILD_DIR)/$(PLUGIN_NAME).so
 	rm -f $(BUILD_DIR)/$(PLUGIN_NAME).dylib
 	rm -f $(BUILD_DIR)/$(PLUGIN_NAME).dll
 	rm -f $(PLUGIN_HEADER)
+	rm -rf $(DIST_DIR)

@@ -2,3 +2,6 @@
 *.dylib
 *.so
 *.h
+dist/
+.gocache/
+.gopath/
