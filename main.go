@@ -180,7 +180,7 @@ type quotaAccountResult struct {
 	HTTPStatus int             `json:"http_status,omitempty"`
 	Endpoint   string          `json:"endpoint,omitempty"`
 	Quota      json.RawMessage `json:"quota,omitempty"`
-	Raw        json.RawMessage `json:"raw,omitempty"`
+	Raw        any             `json:"raw,omitempty"`
 	Fields     map[string]any  `json:"fields,omitempty"`
 	Error      string          `json:"error,omitempty"`
 }
@@ -420,10 +420,13 @@ func queryOneCodexQuota(auth pluginapi.HostAuthFileEntry, endpoints []string, ho
 		}
 	}
 	result.HTTPStatus = httpResp.StatusCode
-	result.Raw = append(json.RawMessage(nil), httpResp.Body...)
 	if len(httpResp.Body) > 0 && json.Valid(httpResp.Body) {
-		result.Quota = append(json.RawMessage(nil), httpResp.Body...)
+		raw := append(json.RawMessage(nil), httpResp.Body...)
+		result.Raw = raw
+		result.Quota = raw
 		result.Fields = extractQuotaFields(httpResp.Body)
+	} else if len(httpResp.Body) > 0 {
+		result.Raw = string(httpResp.Body)
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		result.Error = strings.TrimSpace(string(httpResp.Body))
