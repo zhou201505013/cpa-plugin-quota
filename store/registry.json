@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "codex-quota",
+      "name": "Codex Quota",
+      "description": "Query Codex quota through the CLIProxyAPI Management API.",
+      "author": "zhou201505013",
+      "version": "0.1.1",
+      "repository": "https://github.com/zhou201505013/cpa-plugin-quota",
+      "license": "MIT",
+      "tags": ["management", "codex", "quota"]
+    }
+  ]
+}

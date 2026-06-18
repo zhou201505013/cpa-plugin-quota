@@ -87,3 +87,17 @@ https://github.com/zhou201505013/cpa-plugin-quota
 
 The plugin metadata returned at load time already declares `codex-quota`,
 version, repository, and the Management API capability.
+
+For private testing without adding the plugin to the official CPA plugin store,
+add this repository's registry to your CLIProxyAPI config:
+
+```yaml
+plugins:
+  enabled: true
+  dir: "plugins"
+  store-sources:
+    - "https://raw.githubusercontent.com/zhou201505013/cpa-plugin-quota/master/store/registry.json"
+  configs:
+    codex-quota:
+      enabled: true
+```

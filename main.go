@@ -273,7 +273,7 @@ func pluginRegistration() registration {
 		Metadata: pluginapi.Metadata{
 			Name:             pluginName,
 			Version:          pluginVersion,
-			Author:           "router-for-me",
+			Author:           "zhou201505013",
 			GitHubRepository: "https://github.com/zhou201505013/cpa-plugin-quota",
 			ConfigFields:     []pluginapi.ConfigField{},
 		},
