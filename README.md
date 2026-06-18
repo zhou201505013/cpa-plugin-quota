@@ -82,7 +82,7 @@ After the release is available, register the GitHub repository in the CPA plugin
 store using the repository URL:
 
 ```text
-https://github.com/router-for-me/cpa-plugin-quota
+https://github.com/zhou201505013/cpa-plugin-quota
 ```
 
 The plugin metadata returned at load time already declares `codex-quota`,
