@@ -51,6 +51,9 @@ func TestQuotaHTTPErrorSummarizesCloudflareChallenge(t *testing.T) {
 	if strings.Contains(errText, "_cf_chl_opt") {
 		t.Fatalf("quotaHTTPError leaked challenge HTML: %q", errText)
 	}
+	if code := quotaHTTPErrorCode(resp); code != "cloudflare_challenge" {
+		t.Fatalf("quotaHTTPErrorCode = %q, want cloudflare_challenge", code)
+	}
 }
 
 func TestTrimmedResponseTextCapsLargeHTML(t *testing.T) {

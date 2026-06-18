@@ -75,7 +75,7 @@ const (
 	defaultQuotaEndpoint   = "https://chatgpt.com/backend-api/codex/quota"
 	defaultCodexUserAgent  = "codex_cli_rs/0.133.0"
 	defaultCodexOriginator = "codex_cli_rs"
-	maxRawTextLength       = 4096
+	maxRawTextLength       = 512
 )
 
 var pluginVersion = "0.1.0"
@@ -185,6 +185,7 @@ type quotaAccountResult struct {
 	Quota      json.RawMessage `json:"quota,omitempty"`
 	Raw        any             `json:"raw,omitempty"`
 	Fields     map[string]any  `json:"fields,omitempty"`
+	ErrorCode  string          `json:"error_code,omitempty"`
 	Error      string          `json:"error,omitempty"`
 }
 
@@ -428,10 +429,11 @@ func queryOneCodexQuota(auth pluginapi.HostAuthFileEntry, endpoints []string, ho
 		result.Raw = raw
 		result.Quota = raw
 		result.Fields = extractQuotaFields(httpResp.Body)
-	} else if len(httpResp.Body) > 0 {
+	} else if len(httpResp.Body) > 0 && !looksLikeCloudflareChallenge(httpResp.Body) {
 		result.Raw = trimmedResponseText(httpResp.Body)
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		result.ErrorCode = quotaHTTPErrorCode(httpResp)
 		result.Error = quotaHTTPError(httpResp)
 		if result.Error == "" {
 			result.Error = "quota endpoint returned status " + strconv.Itoa(httpResp.StatusCode)
@@ -504,6 +506,16 @@ func quotaHTTPError(resp hostHTTPResponse) string {
 		return body
 	}
 	return "quota endpoint returned status " + strconv.Itoa(resp.StatusCode) + ": " + trimmedResponseText(resp.Body)
+}
+
+func quotaHTTPErrorCode(resp hostHTTPResponse) string {
+	if looksLikeCloudflareChallenge(resp.Body) {
+		return "cloudflare_challenge"
+	}
+	if resp.StatusCode > 0 {
+		return "http_" + strconv.Itoa(resp.StatusCode)
+	}
+	return ""
 }
 
 func looksLikeCloudflareChallenge(body []byte) bool {
