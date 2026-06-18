@@ -58,6 +58,7 @@ import "C"
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -194,6 +195,7 @@ type codexAuthPayload struct {
 	Email       string
 	AccountID   string
 	PlanType    string
+	ProxyURL    string
 }
 
 func main() {}
@@ -411,7 +413,7 @@ func queryOneCodexQuota(auth pluginapi.HostAuthFileEntry, endpoints []string, ho
 	var errHTTP error
 	for i, endpoint := range endpoints {
 		result.Endpoint = endpoint
-		httpResp, errHTTP = doQuotaHTTPRequest(endpoint, authPayload.AccessToken, authPayload.AccountID, hostCallbackID)
+		httpResp, errHTTP = doQuotaHTTPRequest(endpoint, authPayload.AccessToken, authPayload.AccountID, authPayload.ProxyURL, hostCallbackID)
 		if errHTTP != nil {
 			result.Error = errHTTP.Error()
 			return result
@@ -469,6 +471,7 @@ func parseCodexAuthJSON(raw json.RawMessage) (codexAuthPayload, error) {
 		Email:       getString(root, "email"),
 		AccountID:   getString(root, "account_id"),
 		PlanType:    getString(root, "chatgpt_plan_type"),
+		ProxyURL:    getString(root, "proxy_url"),
 	}
 	if tokenData, ok := root["token_data"].(map[string]any); ok {
 		if payload.AccessToken == "" {
@@ -483,6 +486,9 @@ func parseCodexAuthJSON(raw json.RawMessage) (codexAuthPayload, error) {
 	}
 	if payload.PlanType == "" {
 		payload.PlanType = getString(root, "plan_type")
+	}
+	if attributes, ok := root["attributes"].(map[string]any); ok && payload.ProxyURL == "" {
+		payload.ProxyURL = getString(attributes, "proxy_url")
 	}
 	return payload, nil
 }
@@ -533,21 +539,15 @@ func trimmedResponseText(body []byte) string {
 	return text[:maxRawTextLength] + "...(truncated)"
 }
 
-func doQuotaHTTPRequest(endpoint, accessToken, accountID, hostCallbackID string) (hostHTTPResponse, error) {
+func doQuotaHTTPRequest(endpoint, accessToken, accountID, proxyURL, hostCallbackID string) (hostHTTPResponse, error) {
+	if strings.TrimSpace(proxyURL) != "" {
+		return doDirectQuotaHTTPRequest(endpoint, accessToken, accountID, proxyURL)
+	}
 	req := hostHTTPRequest{
 		HostCallbackID: strings.TrimSpace(hostCallbackID),
 		Method:         http.MethodGet,
 		URL:            endpoint,
-		Headers: http.Header{
-			"accept":        []string{"application/json"},
-			"authorization": []string{"Bearer " + accessToken},
-			"originator":    []string{defaultCodexOriginator},
-			"user-agent":    []string{defaultCodexUserAgent},
-			"openai-beta":   []string{"codex_cli_simplified_flow=true"},
-		},
-	}
-	if strings.TrimSpace(accountID) != "" {
-		req.Headers.Set("chatgpt-account-id", strings.TrimSpace(accountID))
+		Headers:        codexQuotaHeaders(accessToken, accountID),
 	}
 	result, errCall := callHost(pluginabi.MethodHostHTTPDo, req)
 	if errCall != nil {
@@ -558,6 +558,53 @@ func doQuotaHTTPRequest(endpoint, accessToken, accountID, hostCallbackID string)
 		return hostHTTPResponse{}, fmt.Errorf("decode host.http.do result: %w", errUnmarshal)
 	}
 	return resp, nil
+}
+
+func doDirectQuotaHTTPRequest(endpoint, accessToken, accountID, proxyURL string) (hostHTTPResponse, error) {
+	parsedProxyURL, errParseProxy := url.Parse(strings.TrimSpace(proxyURL))
+	if errParseProxy != nil {
+		return hostHTTPResponse{}, fmt.Errorf("invalid auth proxy_url: %w", errParseProxy)
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = http.ProxyURL(parsedProxyURL)
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   30 * time.Second,
+	}
+
+	req, errNewRequest := http.NewRequest(http.MethodGet, endpoint, nil)
+	if errNewRequest != nil {
+		return hostHTTPResponse{}, errNewRequest
+	}
+	req.Header = codexQuotaHeaders(accessToken, accountID)
+
+	resp, errDo := client.Do(req)
+	if errDo != nil {
+		return hostHTTPResponse{}, errDo
+	}
+	defer resp.Body.Close()
+	body, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		return hostHTTPResponse{}, errRead
+	}
+	return hostHTTPResponse{
+		StatusCode: resp.StatusCode,
+		Headers:    resp.Header.Clone(),
+		Body:       body,
+	}, nil
+}
+
+func codexQuotaHeaders(accessToken, accountID string) http.Header {
+	headers := http.Header{}
+	headers.Set("accept", "application/json")
+	headers.Set("authorization", "Bearer "+accessToken)
+	headers.Set("originator", defaultCodexOriginator)
+	headers.Set("user-agent", defaultCodexUserAgent)
+	headers.Set("openai-beta", "codex_cli_simplified_flow=true")
+	if strings.TrimSpace(accountID) != "" {
+		headers.Set("chatgpt-account-id", strings.TrimSpace(accountID))
+	}
+	return headers
 }
 
 func extractQuotaFields(raw json.RawMessage) map[string]any {

@@ -65,3 +65,51 @@ func TestTrimmedResponseTextCapsLargeHTML(t *testing.T) {
 		t.Fatalf("trimmed text suffix = %q, want truncation marker", text[len(text)-20:])
 	}
 }
+
+func TestParseCodexAuthJSONReadsProxyURL(t *testing.T) {
+	payload, err := parseCodexAuthJSON(json.RawMessage(`{
+		"access_token": "token",
+		"email": "user@example.com",
+		"account_id": "acc",
+		"chatgpt_plan_type": "plus",
+		"proxy_url": "http://127.0.0.1:7897"
+	}`))
+	if err != nil {
+		t.Fatalf("parseCodexAuthJSON error = %v", err)
+	}
+	if payload.ProxyURL != "http://127.0.0.1:7897" {
+		t.Fatalf("ProxyURL = %q", payload.ProxyURL)
+	}
+}
+
+func TestParseCodexAuthJSONReadsAttributeProxyURL(t *testing.T) {
+	payload, err := parseCodexAuthJSON(json.RawMessage(`{
+		"token_data": {"access_token": "token"},
+		"attributes": {"proxy_url": "socks5://127.0.0.1:7897"}
+	}`))
+	if err != nil {
+		t.Fatalf("parseCodexAuthJSON error = %v", err)
+	}
+	if payload.ProxyURL != "socks5://127.0.0.1:7897" {
+		t.Fatalf("ProxyURL = %q", payload.ProxyURL)
+	}
+}
+
+func TestCodexQuotaHeaders(t *testing.T) {
+	headers := codexQuotaHeaders("token", " account ")
+	if headers.Get("authorization") != "Bearer token" {
+		t.Fatalf("authorization = %q", headers.Get("authorization"))
+	}
+	if headers.Get("chatgpt-account-id") != "account" {
+		t.Fatalf("chatgpt-account-id = %q", headers.Get("chatgpt-account-id"))
+	}
+	if headers.Get("originator") != defaultCodexOriginator {
+		t.Fatalf("originator = %q", headers.Get("originator"))
+	}
+	if headers.Get("user-agent") != defaultCodexUserAgent {
+		t.Fatalf("user-agent = %q", headers.Get("user-agent"))
+	}
+	if headers.Get("openai-beta") == "" {
+		t.Fatal("openai-beta header is empty")
+	}
+}
