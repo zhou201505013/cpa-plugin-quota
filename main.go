@@ -188,7 +188,7 @@ type quotaAccountResult struct {
 	StatusText     string                             `json:"status_message,omitempty"`
 	Disabled       bool                               `json:"disabled,omitempty"`
 	Unavailable    bool                               `json:"unavailable,omitempty"`
-	NextRetryAfter time.Time                          `json:"next_retry_after,omitempty"`
+	NextRetryAfter *time.Time                         `json:"next_retry_after,omitempty"`
 	Success        int64                              `json:"success,omitempty"`
 	Failed         int64                              `json:"failed,omitempty"`
 	RecentRequests []pluginapi.HostRecentRequestEntry `json:"recent_requests,omitempty"`
@@ -452,7 +452,7 @@ func listCodexAuths() ([]pluginapi.HostAuthFileEntry, error) {
 }
 
 func quotaFromCPARuntimeAuth(auth pluginapi.HostAuthFileEntry) quotaAccountResult {
-	quota := cpaRuntimeQuota(auth)
+	quota := cpaRuntimeQuotaSummary(auth)
 	rawQuota, _ := json.Marshal(quota)
 	result := quotaAccountResult{
 		AuthIndex:      auth.AuthIndex,
@@ -465,7 +465,7 @@ func quotaFromCPARuntimeAuth(auth pluginapi.HostAuthFileEntry) quotaAccountResul
 		StatusText:     auth.StatusMessage,
 		Disabled:       auth.Disabled,
 		Unavailable:    auth.Unavailable,
-		NextRetryAfter: auth.NextRetryAfter,
+		NextRetryAfter: timePtrIfSet(auth.NextRetryAfter),
 		Success:        auth.Success,
 		Failed:         auth.Failed,
 		RecentRequests: append([]pluginapi.HostRecentRequestEntry(nil), auth.RecentRequests...),
@@ -473,7 +473,6 @@ func quotaFromCPARuntimeAuth(auth pluginapi.HostAuthFileEntry) quotaAccountResul
 		Endpoint:       cpaRuntimeEndpoint,
 		Source:         quotaSourceCPARuntime,
 		Quota:          json.RawMessage(rawQuota),
-		Raw:            quota,
 		Fields:         quota,
 	}
 	if auth.Disabled {
@@ -489,17 +488,16 @@ func quotaFromCPARuntimeAuth(auth pluginapi.HostAuthFileEntry) quotaAccountResul
 	return result
 }
 
-func cpaRuntimeQuota(auth pluginapi.HostAuthFileEntry) map[string]any {
+func cpaRuntimeQuotaSummary(auth pluginapi.HostAuthFileEntry) map[string]any {
 	quota := map[string]any{
-		"source":          quotaSourceCPARuntime,
-		"status":          auth.Status,
-		"status_message":  auth.StatusMessage,
-		"disabled":        auth.Disabled,
-		"unavailable":     auth.Unavailable,
-		"quota_exceeded":  cpaRuntimeQuotaExceeded(auth),
-		"success":         auth.Success,
-		"failed":          auth.Failed,
-		"recent_requests": auth.RecentRequests,
+		"source":         quotaSourceCPARuntime,
+		"status":         auth.Status,
+		"status_message": auth.StatusMessage,
+		"disabled":       auth.Disabled,
+		"unavailable":    auth.Unavailable,
+		"quota_exceeded": cpaRuntimeQuotaExceeded(auth),
+		"success":        auth.Success,
+		"failed":         auth.Failed,
 	}
 	if !auth.NextRetryAfter.IsZero() {
 		quota["next_retry_after"] = auth.NextRetryAfter.Format(time.RFC3339)
@@ -515,6 +513,13 @@ func cpaRuntimeQuotaExceeded(auth pluginapi.HostAuthFileEntry) bool {
 		return true
 	}
 	return auth.Unavailable && !auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(time.Now())
+}
+
+func timePtrIfSet(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
 }
 
 func queryOneCodexQuota(auth pluginapi.HostAuthFileEntry, endpoints []string, hostCallbackID string) quotaAccountResult {

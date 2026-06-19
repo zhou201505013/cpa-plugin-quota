@@ -170,4 +170,36 @@ func TestQuotaFromCPARuntimeAuth(t *testing.T) {
 	if got, ok := result.Fields["quota_exceeded"].(bool); !ok || !got {
 		t.Fatalf("quota_exceeded = %#v", result.Fields["quota_exceeded"])
 	}
+	if result.NextRetryAfter == nil || !result.NextRetryAfter.Equal(nextRetry) {
+		t.Fatalf("NextRetryAfter = %#v", result.NextRetryAfter)
+	}
+	if _, ok := result.Fields["recent_requests"]; ok {
+		t.Fatal("Fields contains duplicated recent_requests")
+	}
+	if result.Raw != nil {
+		t.Fatalf("Raw = %#v, want nil for CPA runtime result", result.Raw)
+	}
+}
+
+func TestQuotaFromCPARuntimeAuthOmitsZeroRetryTime(t *testing.T) {
+	result := quotaFromCPARuntimeAuth(pluginapi.HostAuthFileEntry{
+		AuthIndex: "auth-index",
+		Name:      "codex.json",
+		Provider:  "codex",
+		Status:    "active",
+	})
+	if result.NextRetryAfter != nil {
+		t.Fatalf("NextRetryAfter = %#v, want nil", result.NextRetryAfter)
+	}
+	raw := jsonResponse(http.StatusOK, quotaResponse{
+		Provider:  "codex",
+		Source:    quotaSourceCPARuntime,
+		Endpoint:  cpaRuntimeEndpoint,
+		CheckedAt: "2026-06-20T00:00:00Z",
+		Accounts:  []quotaAccountResult{result},
+		Summary:   quotaSummary{Total: 1, OK: 1},
+	})
+	if strings.Contains(string(raw.Body), "0001-01-01") {
+		t.Fatalf("response leaked zero time: %s", string(raw.Body))
+	}
 }
