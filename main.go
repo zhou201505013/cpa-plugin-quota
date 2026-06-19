@@ -73,6 +73,9 @@ import (
 
 const (
 	pluginName             = "codex-quota"
+	cpaRuntimeEndpoint     = "cpa://auth-runtime"
+	quotaSourceCPARuntime  = "cpa-runtime"
+	quotaSourceUpstream    = "upstream"
 	defaultQuotaEndpoint   = "https://chatgpt.com/backend-api/codex/quota"
 	defaultCodexUserAgent  = "codex_cli_rs/0.133.0"
 	defaultCodexOriginator = "codex_cli_rs"
@@ -159,6 +162,7 @@ type hostHTTPResponse struct {
 
 type quotaResponse struct {
 	Provider  string               `json:"provider"`
+	Source    string               `json:"source,omitempty"`
 	Endpoint  string               `json:"endpoint"`
 	Endpoints []string             `json:"endpoints,omitempty"`
 	CheckedAt string               `json:"checked_at"`
@@ -173,21 +177,29 @@ type quotaSummary struct {
 }
 
 type quotaAccountResult struct {
-	AuthIndex  string          `json:"auth_index,omitempty"`
-	ID         string          `json:"id,omitempty"`
-	Name       string          `json:"name,omitempty"`
-	Email      string          `json:"email,omitempty"`
-	AccountID  string          `json:"account_id,omitempty"`
-	PlanType   string          `json:"plan_type,omitempty"`
-	Status     string          `json:"status,omitempty"`
-	OK         bool            `json:"ok"`
-	HTTPStatus int             `json:"http_status,omitempty"`
-	Endpoint   string          `json:"endpoint,omitempty"`
-	Quota      json.RawMessage `json:"quota,omitempty"`
-	Raw        any             `json:"raw,omitempty"`
-	Fields     map[string]any  `json:"fields,omitempty"`
-	ErrorCode  string          `json:"error_code,omitempty"`
-	Error      string          `json:"error,omitempty"`
+	AuthIndex      string                             `json:"auth_index,omitempty"`
+	ID             string                             `json:"id,omitempty"`
+	Name           string                             `json:"name,omitempty"`
+	Source         string                             `json:"source,omitempty"`
+	Email          string                             `json:"email,omitempty"`
+	AccountID      string                             `json:"account_id,omitempty"`
+	PlanType       string                             `json:"plan_type,omitempty"`
+	Status         string                             `json:"status,omitempty"`
+	StatusText     string                             `json:"status_message,omitempty"`
+	Disabled       bool                               `json:"disabled,omitempty"`
+	Unavailable    bool                               `json:"unavailable,omitempty"`
+	NextRetryAfter time.Time                          `json:"next_retry_after,omitempty"`
+	Success        int64                              `json:"success,omitempty"`
+	Failed         int64                              `json:"failed,omitempty"`
+	RecentRequests []pluginapi.HostRecentRequestEntry `json:"recent_requests,omitempty"`
+	OK             bool                               `json:"ok"`
+	HTTPStatus     int                                `json:"http_status,omitempty"`
+	Endpoint       string                             `json:"endpoint,omitempty"`
+	Quota          json.RawMessage                    `json:"quota,omitempty"`
+	Raw            any                                `json:"raw,omitempty"`
+	Fields         map[string]any                     `json:"fields,omitempty"`
+	ErrorCode      string                             `json:"error_code,omitempty"`
+	Error          string                             `json:"error,omitempty"`
 }
 
 type codexAuthPayload struct {
@@ -308,9 +320,53 @@ func handleManagement(raw []byte) ([]byte, error) {
 }
 
 func queryCodexQuota(req managementRequest) quotaResponse {
+	if quotaSource(req.Query) == quotaSourceUpstream {
+		return queryCodexQuotaFromUpstream(req)
+	}
+	return queryCodexQuotaFromCPARuntime(req)
+}
+
+func queryCodexQuotaFromCPARuntime(req managementRequest) quotaResponse {
+	out := quotaResponse{
+		Provider:  "codex",
+		Source:    quotaSourceCPARuntime,
+		Endpoint:  cpaRuntimeEndpoint,
+		CheckedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	auths, errList := listCodexAuths()
+	if errList != nil {
+		out.Accounts = append(out.Accounts, quotaAccountResult{
+			OK:     false,
+			Source: quotaSourceCPARuntime,
+			Error:  errList.Error(),
+		})
+		out.Summary.Total = 1
+		out.Summary.Error = 1
+		return out
+	}
+	authIndexFilter := strings.TrimSpace(req.Query.Get("auth_index"))
+	for _, auth := range auths {
+		if authIndexFilter != "" && auth.AuthIndex != authIndexFilter {
+			continue
+		}
+		result := quotaFromCPARuntimeAuth(auth)
+		out.Accounts = append(out.Accounts, result)
+		if result.OK {
+			out.Summary.OK++
+		} else {
+			out.Summary.Error++
+		}
+	}
+	out.Summary.Total = len(out.Accounts)
+	return out
+}
+
+func queryCodexQuotaFromUpstream(req managementRequest) quotaResponse {
 	endpoints := quotaEndpoints(req.Query)
 	out := quotaResponse{
 		Provider:  "codex",
+		Source:    quotaSourceUpstream,
 		Endpoint:  endpoints[0],
 		Endpoints: endpoints,
 		CheckedAt: time.Now().UTC().Format(time.RFC3339),
@@ -341,6 +397,24 @@ func queryCodexQuota(req managementRequest) quotaResponse {
 	}
 	out.Summary.Total = len(out.Accounts)
 	return out
+}
+
+func quotaSource(query url.Values) string {
+	if query == nil {
+		return quotaSourceCPARuntime
+	}
+	source := strings.ToLower(strings.TrimSpace(query.Get("source")))
+	switch source {
+	case quotaSourceUpstream, "codex", "direct", "remote":
+		return quotaSourceUpstream
+	case quotaSourceCPARuntime, "cpa", "runtime", "":
+		if strings.TrimSpace(query.Get("endpoint")) != "" {
+			return quotaSourceUpstream
+		}
+		return quotaSourceCPARuntime
+	default:
+		return quotaSourceCPARuntime
+	}
 }
 
 func quotaEndpoints(query url.Values) []string {
@@ -377,6 +451,72 @@ func listCodexAuths() ([]pluginapi.HostAuthFileEntry, error) {
 	return auths, nil
 }
 
+func quotaFromCPARuntimeAuth(auth pluginapi.HostAuthFileEntry) quotaAccountResult {
+	quota := cpaRuntimeQuota(auth)
+	rawQuota, _ := json.Marshal(quota)
+	result := quotaAccountResult{
+		AuthIndex:      auth.AuthIndex,
+		ID:             auth.ID,
+		Name:           auth.Name,
+		Email:          auth.Email,
+		AccountID:      auth.Account,
+		PlanType:       auth.AccountType,
+		Status:         auth.Status,
+		StatusText:     auth.StatusMessage,
+		Disabled:       auth.Disabled,
+		Unavailable:    auth.Unavailable,
+		NextRetryAfter: auth.NextRetryAfter,
+		Success:        auth.Success,
+		Failed:         auth.Failed,
+		RecentRequests: append([]pluginapi.HostRecentRequestEntry(nil), auth.RecentRequests...),
+		OK:             !auth.Disabled && !auth.Unavailable,
+		Endpoint:       cpaRuntimeEndpoint,
+		Source:         quotaSourceCPARuntime,
+		Quota:          json.RawMessage(rawQuota),
+		Raw:            quota,
+		Fields:         quota,
+	}
+	if auth.Disabled {
+		result.ErrorCode = "auth_disabled"
+		result.Error = "codex auth is disabled"
+	} else if auth.Unavailable {
+		result.ErrorCode = "auth_unavailable"
+		result.Error = strings.TrimSpace(auth.StatusMessage)
+		if result.Error == "" {
+			result.Error = "codex auth is unavailable"
+		}
+	}
+	return result
+}
+
+func cpaRuntimeQuota(auth pluginapi.HostAuthFileEntry) map[string]any {
+	quota := map[string]any{
+		"source":          quotaSourceCPARuntime,
+		"status":          auth.Status,
+		"status_message":  auth.StatusMessage,
+		"disabled":        auth.Disabled,
+		"unavailable":     auth.Unavailable,
+		"quota_exceeded":  cpaRuntimeQuotaExceeded(auth),
+		"success":         auth.Success,
+		"failed":          auth.Failed,
+		"recent_requests": auth.RecentRequests,
+	}
+	if !auth.NextRetryAfter.IsZero() {
+		quota["next_retry_after"] = auth.NextRetryAfter.Format(time.RFC3339)
+	}
+	return quota
+}
+
+func cpaRuntimeQuotaExceeded(auth pluginapi.HostAuthFileEntry) bool {
+	message := strings.ToLower(strings.TrimSpace(auth.StatusMessage))
+	if strings.Contains(message, "quota") ||
+		strings.Contains(message, "rate limit") ||
+		strings.Contains(message, "too many requests") {
+		return true
+	}
+	return auth.Unavailable && !auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(time.Now())
+}
+
 func queryOneCodexQuota(auth pluginapi.HostAuthFileEntry, endpoints []string, hostCallbackID string) quotaAccountResult {
 	if len(endpoints) == 0 {
 		endpoints = []string{defaultQuotaEndpoint}
@@ -389,6 +529,7 @@ func queryOneCodexQuota(auth pluginapi.HostAuthFileEntry, endpoints []string, ho
 		AccountID: auth.Account,
 		PlanType:  auth.AccountType,
 		Status:    auth.Status,
+		Source:    quotaSourceUpstream,
 	}
 	authPayload, errAuth := loadCodexAuthPayload(auth)
 	if errAuth != nil {

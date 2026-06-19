@@ -3,8 +3,12 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 func TestJSONResponseAllowsTextRawBody(t *testing.T) {
@@ -111,5 +115,59 @@ func TestCodexQuotaHeaders(t *testing.T) {
 	}
 	if headers.Get("openai-beta") == "" {
 		t.Fatal("openai-beta header is empty")
+	}
+}
+
+func TestQuotaSourceDefaultsToCPARuntime(t *testing.T) {
+	if got := quotaSource(nil); got != quotaSourceCPARuntime {
+		t.Fatalf("quotaSource(nil) = %q", got)
+	}
+	if got := quotaSource(url.Values{}); got != quotaSourceCPARuntime {
+		t.Fatalf("quotaSource(empty) = %q", got)
+	}
+	if got := quotaSource(url.Values{"source": []string{"upstream"}}); got != quotaSourceUpstream {
+		t.Fatalf("quotaSource(upstream) = %q", got)
+	}
+	if got := quotaSource(url.Values{"endpoint": []string{defaultQuotaEndpoint}}); got != quotaSourceUpstream {
+		t.Fatalf("quotaSource(endpoint) = %q", got)
+	}
+}
+
+func TestQuotaFromCPARuntimeAuth(t *testing.T) {
+	nextRetry := time.Now().Add(time.Minute).UTC()
+	result := quotaFromCPARuntimeAuth(pluginapi.HostAuthFileEntry{
+		ID:             "id",
+		AuthIndex:      "auth-index",
+		Name:           "codex.json",
+		Provider:       "codex",
+		Email:          "user@example.com",
+		Account:        "account",
+		AccountType:    "plus",
+		Status:         "ready",
+		StatusMessage:  "quota exhausted",
+		Unavailable:    true,
+		NextRetryAfter: nextRetry,
+		Success:        3,
+		Failed:         2,
+		RecentRequests: []pluginapi.HostRecentRequestEntry{{Success: 1, Failed: 1}},
+	})
+
+	if result.OK {
+		t.Fatal("OK = true, want false for unavailable auth")
+	}
+	if result.Source != quotaSourceCPARuntime {
+		t.Fatalf("Source = %q", result.Source)
+	}
+	if result.Endpoint != cpaRuntimeEndpoint {
+		t.Fatalf("Endpoint = %q", result.Endpoint)
+	}
+	if result.ErrorCode != "auth_unavailable" {
+		t.Fatalf("ErrorCode = %q", result.ErrorCode)
+	}
+	if !json.Valid(result.Quota) {
+		t.Fatalf("Quota is not valid JSON: %s", string(result.Quota))
+	}
+	if got, ok := result.Fields["quota_exceeded"].(bool); !ok || !got {
+		t.Fatalf("quota_exceeded = %#v", result.Fields["quota_exceeded"])
 	}
 }
