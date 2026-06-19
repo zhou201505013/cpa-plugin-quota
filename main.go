@@ -74,6 +74,8 @@ import (
 const (
 	pluginName             = "codex-quota"
 	cpaRuntimeEndpoint     = "cpa://auth-runtime"
+	defaultCPAAPIBaseURL   = "http://127.0.0.1:8317"
+	quotaSourceCPAAPICall  = "cpa-api-call"
 	quotaSourceCPARuntime  = "cpa-runtime"
 	quotaSourceUpstream    = "upstream"
 	defaultQuotaEndpoint   = "https://chatgpt.com/backend-api/codex/quota"
@@ -158,6 +160,20 @@ type hostHTTPResponse struct {
 	StatusCode int         `json:"StatusCode"`
 	Headers    http.Header `json:"Headers"`
 	Body       []byte      `json:"Body"`
+}
+
+type cpaAPICallRequest struct {
+	AuthIndex string            `json:"auth_index,omitempty"`
+	Method    string            `json:"method"`
+	URL       string            `json:"url"`
+	Header    map[string]string `json:"header,omitempty"`
+	Data      string            `json:"data,omitempty"`
+}
+
+type cpaAPICallResponse struct {
+	StatusCode int                 `json:"status_code"`
+	Header     map[string][]string `json:"header"`
+	Body       string              `json:"body"`
 }
 
 type quotaResponse struct {
@@ -320,10 +336,52 @@ func handleManagement(raw []byte) ([]byte, error) {
 }
 
 func queryCodexQuota(req managementRequest) quotaResponse {
-	if quotaSource(req.Query) == quotaSourceUpstream {
+	switch quotaSource(req.Query) {
+	case quotaSourceCPARuntime:
+		return queryCodexQuotaFromCPARuntime(req)
+	case quotaSourceUpstream:
 		return queryCodexQuotaFromUpstream(req)
+	default:
+		return queryCodexQuotaFromCPAAPICall(req)
 	}
-	return queryCodexQuotaFromCPARuntime(req)
+}
+
+func queryCodexQuotaFromCPAAPICall(req managementRequest) quotaResponse {
+	endpoints := quotaEndpoints(req.Query)
+	out := quotaResponse{
+		Provider:  "codex",
+		Source:    quotaSourceCPAAPICall,
+		Endpoint:  endpoints[0],
+		Endpoints: endpoints,
+		CheckedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	auths, errList := listCodexAuths()
+	if errList != nil {
+		out.Accounts = append(out.Accounts, quotaAccountResult{
+			OK:     false,
+			Source: quotaSourceCPAAPICall,
+			Error:  errList.Error(),
+		})
+		out.Summary.Total = 1
+		out.Summary.Error = 1
+		return out
+	}
+	authIndexFilter := strings.TrimSpace(req.Query.Get("auth_index"))
+	for _, auth := range auths {
+		if authIndexFilter != "" && auth.AuthIndex != authIndexFilter {
+			continue
+		}
+		result := queryOneCodexQuotaViaCPAAPICall(req, auth, endpoints)
+		out.Accounts = append(out.Accounts, result)
+		if result.OK {
+			out.Summary.OK++
+		} else {
+			out.Summary.Error++
+		}
+	}
+	out.Summary.Total = len(out.Accounts)
+	return out
 }
 
 func queryCodexQuotaFromCPARuntime(req managementRequest) quotaResponse {
@@ -401,19 +459,21 @@ func queryCodexQuotaFromUpstream(req managementRequest) quotaResponse {
 
 func quotaSource(query url.Values) string {
 	if query == nil {
-		return quotaSourceCPARuntime
+		return quotaSourceCPAAPICall
 	}
 	source := strings.ToLower(strings.TrimSpace(query.Get("source")))
 	switch source {
 	case quotaSourceUpstream, "codex", "direct", "remote":
 		return quotaSourceUpstream
-	case quotaSourceCPARuntime, "cpa", "runtime", "":
+	case quotaSourceCPARuntime, "runtime":
+		return quotaSourceCPARuntime
+	case quotaSourceCPAAPICall, "api-call", "api_call", "cpa", "":
 		if strings.TrimSpace(query.Get("endpoint")) != "" {
-			return quotaSourceUpstream
+			return quotaSourceCPAAPICall
 		}
-		return quotaSourceCPARuntime
+		return quotaSourceCPAAPICall
 	default:
-		return quotaSourceCPARuntime
+		return quotaSourceCPAAPICall
 	}
 }
 
@@ -485,6 +545,58 @@ func quotaFromCPARuntimeAuth(auth pluginapi.HostAuthFileEntry) quotaAccountResul
 			result.Error = "codex auth is unavailable"
 		}
 	}
+	return result
+}
+
+func queryOneCodexQuotaViaCPAAPICall(req managementRequest, auth pluginapi.HostAuthFileEntry, endpoints []string) quotaAccountResult {
+	if len(endpoints) == 0 {
+		endpoints = []string{defaultQuotaEndpoint}
+	}
+	result := quotaAccountResult{
+		AuthIndex: auth.AuthIndex,
+		ID:        auth.ID,
+		Name:      auth.Name,
+		Email:     auth.Email,
+		AccountID: auth.Account,
+		PlanType:  auth.AccountType,
+		Status:    auth.Status,
+		Source:    quotaSourceCPAAPICall,
+	}
+
+	var httpResp hostHTTPResponse
+	var errHTTP error
+	for i, endpoint := range endpoints {
+		result.Endpoint = endpoint
+		httpResp, errHTTP = doQuotaHTTPRequestViaCPAAPICall(req, auth, endpoint)
+		if errHTTP != nil {
+			result.Error = errHTTP.Error()
+			return result
+		}
+		if !shouldTryNextEndpoint(httpResp) {
+			break
+		}
+		if i == len(endpoints)-1 {
+			break
+		}
+	}
+	result.HTTPStatus = httpResp.StatusCode
+	if len(httpResp.Body) > 0 && json.Valid(httpResp.Body) {
+		raw := append(json.RawMessage(nil), httpResp.Body...)
+		result.Raw = raw
+		result.Quota = raw
+		result.Fields = extractQuotaFields(httpResp.Body)
+	} else if len(httpResp.Body) > 0 && !looksLikeCloudflareChallenge(httpResp.Body) {
+		result.Raw = trimmedResponseText(httpResp.Body)
+	}
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		result.ErrorCode = quotaHTTPErrorCode(httpResp)
+		result.Error = quotaHTTPError(httpResp)
+		if result.Error == "" {
+			result.Error = "quota endpoint returned status " + strconv.Itoa(httpResp.StatusCode)
+		}
+		return result
+	}
+	result.OK = true
 	return result
 }
 
@@ -706,6 +818,92 @@ func doQuotaHTTPRequest(endpoint, accessToken, accountID, proxyURL, hostCallback
 	return resp, nil
 }
 
+func doQuotaHTTPRequestViaCPAAPICall(req managementRequest, auth pluginapi.HostAuthFileEntry, endpoint string) (hostHTTPResponse, error) {
+	apiCallURL, errURL := cpaAPICallURL(req.Query)
+	if errURL != nil {
+		return hostHTTPResponse{}, errURL
+	}
+	apiCallPayload := cpaAPICallRequest{
+		AuthIndex: auth.AuthIndex,
+		Method:    http.MethodGet,
+		URL:       endpoint,
+		Header: map[string]string{
+			"Accept":             "application/json",
+			"Authorization":      "Bearer $TOKEN$",
+			"Originator":         defaultCodexOriginator,
+			"User-Agent":         defaultCodexUserAgent,
+			"OpenAI-Beta":        "codex_cli_simplified_flow=true",
+			"Chatgpt-Account-Id": firstNonEmpty(auth.Account, auth.Email),
+		},
+	}
+	if strings.TrimSpace(apiCallPayload.Header["Chatgpt-Account-Id"]) == "" {
+		delete(apiCallPayload.Header, "Chatgpt-Account-Id")
+	}
+	payload, errMarshal := json.Marshal(apiCallPayload)
+	if errMarshal != nil {
+		return hostHTTPResponse{}, errMarshal
+	}
+	hostReq := hostHTTPRequest{
+		HostCallbackID: strings.TrimSpace(req.HostCallbackID),
+		Method:         http.MethodPost,
+		URL:            apiCallURL,
+		Headers:        cpaManagementHeaders(req.Headers),
+		Body:           payload,
+	}
+	result, errCall := callHost(pluginabi.MethodHostHTTPDo, hostReq)
+	if errCall != nil {
+		return hostHTTPResponse{}, errCall
+	}
+	var hostResp hostHTTPResponse
+	if errUnmarshal := json.Unmarshal(result, &hostResp); errUnmarshal != nil {
+		return hostHTTPResponse{}, fmt.Errorf("decode cpa api-call transport result: %w", errUnmarshal)
+	}
+	if hostResp.StatusCode < 200 || hostResp.StatusCode >= 300 {
+		return hostHTTPResponse{
+			StatusCode: hostResp.StatusCode,
+			Headers:    hostResp.Headers,
+			Body:       hostResp.Body,
+		}, nil
+	}
+	var apiResp cpaAPICallResponse
+	if errUnmarshal := json.Unmarshal(hostResp.Body, &apiResp); errUnmarshal != nil {
+		return hostHTTPResponse{}, fmt.Errorf("decode cpa api-call result: %w", errUnmarshal)
+	}
+	return hostHTTPResponse{
+		StatusCode: apiResp.StatusCode,
+		Headers:    http.Header(apiResp.Header),
+		Body:       []byte(apiResp.Body),
+	}, nil
+}
+
+func cpaAPICallURL(query url.Values) (string, error) {
+	base := defaultCPAAPIBaseURL
+	if query != nil {
+		if override := strings.TrimSpace(query.Get("cpa_base_url")); override != "" {
+			base = override
+		}
+	}
+	parsed, errParse := url.Parse(base)
+	if errParse != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid cpa_base_url %q", base)
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/v0/management/api-call"
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
+}
+
+func cpaManagementHeaders(in http.Header) http.Header {
+	headers := http.Header{}
+	headers.Set("Content-Type", "application/json")
+	for _, key := range []string{"Authorization", "X-Management-Key"} {
+		if value := strings.TrimSpace(in.Get(key)); value != "" {
+			headers.Set(key, value)
+		}
+	}
+	return headers
+}
+
 func doDirectQuotaHTTPRequest(endpoint, accessToken, accountID, proxyURL string) (hostHTTPResponse, error) {
 	parsedProxyURL, errParseProxy := url.Parse(strings.TrimSpace(proxyURL))
 	if errParseProxy != nil {
@@ -751,6 +949,15 @@ func codexQuotaHeaders(accessToken, accountID string) http.Header {
 		headers.Set("chatgpt-account-id", strings.TrimSpace(accountID))
 	}
 	return headers
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if out := strings.TrimSpace(value); out != "" {
+			return out
+		}
+	}
+	return ""
 }
 
 func extractQuotaFields(raw json.RawMessage) map[string]any {

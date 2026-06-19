@@ -118,18 +118,51 @@ func TestCodexQuotaHeaders(t *testing.T) {
 	}
 }
 
-func TestQuotaSourceDefaultsToCPARuntime(t *testing.T) {
-	if got := quotaSource(nil); got != quotaSourceCPARuntime {
+func TestQuotaSourceDefaultsToCPAAPICall(t *testing.T) {
+	if got := quotaSource(nil); got != quotaSourceCPAAPICall {
 		t.Fatalf("quotaSource(nil) = %q", got)
 	}
-	if got := quotaSource(url.Values{}); got != quotaSourceCPARuntime {
+	if got := quotaSource(url.Values{}); got != quotaSourceCPAAPICall {
 		t.Fatalf("quotaSource(empty) = %q", got)
 	}
 	if got := quotaSource(url.Values{"source": []string{"upstream"}}); got != quotaSourceUpstream {
 		t.Fatalf("quotaSource(upstream) = %q", got)
 	}
-	if got := quotaSource(url.Values{"endpoint": []string{defaultQuotaEndpoint}}); got != quotaSourceUpstream {
+	if got := quotaSource(url.Values{"source": []string{"runtime"}}); got != quotaSourceCPARuntime {
+		t.Fatalf("quotaSource(runtime) = %q", got)
+	}
+	if got := quotaSource(url.Values{"endpoint": []string{defaultQuotaEndpoint}}); got != quotaSourceCPAAPICall {
 		t.Fatalf("quotaSource(endpoint) = %q", got)
+	}
+}
+
+func TestCPAAPICallURL(t *testing.T) {
+	got, err := cpaAPICallURL(url.Values{"cpa_base_url": []string{"http://127.0.0.1:9999/base/"}})
+	if err != nil {
+		t.Fatalf("cpaAPICallURL error = %v", err)
+	}
+	if got != "http://127.0.0.1:9999/base/v0/management/api-call" {
+		t.Fatalf("cpaAPICallURL = %q", got)
+	}
+}
+
+func TestCPAManagementHeaders(t *testing.T) {
+	headers := cpaManagementHeaders(http.Header{
+		"Authorization":    []string{"Bearer key"},
+		"X-Management-Key": []string{"mgmt"},
+		"Cookie":           []string{"ignored=true"},
+	})
+	if headers.Get("Content-Type") != "application/json" {
+		t.Fatalf("Content-Type = %q", headers.Get("Content-Type"))
+	}
+	if headers.Get("Authorization") != "Bearer key" {
+		t.Fatalf("Authorization = %q", headers.Get("Authorization"))
+	}
+	if headers.Get("X-Management-Key") != "mgmt" {
+		t.Fatalf("X-Management-Key = %q", headers.Get("X-Management-Key"))
+	}
+	if headers.Get("Cookie") != "" {
+		t.Fatalf("Cookie = %q, want empty", headers.Get("Cookie"))
 	}
 }
 
